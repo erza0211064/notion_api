@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+
+<head>
+    <meta charset="UTF-8">
+    <title>多洛米蒂旅遊書</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    {% for item in data %}
+    {% if item.type == 'heading' %}
+    <h2 class="day-title">{{ item.content }}</h2>
+    {% elif item.type == 'text' %}
+    <p>{{ item.content }}</p>
+    {% elif item.type == 'bullet' %}
+    <ul>
+        <li>{{ item.content }}</li>
+    </ul>
+    {% elif item.type == 'image' %}
+    <div class="photo-container">
+        <img src="{{ item.content }}" alt="Travel Photo">
+    </div>
+    {% endif %}
+    {% endfor %}
+</body>
+
+</html>

@@ -1,0 +1,20 @@
+/* style.css */
+@page {
+    size: A5;
+    margin: 15mm;
+    bleed: 3mm;
+    /* 預留給印刷廠裁切的出血位 */
+}
+
+.day-title {
+    font-size: 24px;
+    color: #2c3e50;
+    page-break-before: always;
+    /* 確保每一天的行程都從新的一頁開始 */
+}
+
+.photo-container img {
+    width: 100%;
+    border-radius: 8px;
+    /* 讓圖片有漂亮的圓角 */
+}
