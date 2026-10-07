@@ -13,12 +13,23 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import base64
+from turtle import width
+import urllib.request
+from io import BytesIO
+
+try:
+    from PIL import Image
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 
 ROOT = Path(__file__).resolve().parent
 EXPORT_PREFIX = "d7634390-a666-42c1-b490-91ee6f059f52_ExportBlock-"
 PDF_PATH = ROOT / "Dolomites_Travel_Booklet_2026.pdf"
 HTML_PATH = ROOT / "Dolomites_Travel_Booklet_2026.html"
+_image_cache: dict[str, str] = {}
 
 
 def find_csv(pattern: str) -> Path:
@@ -54,6 +65,53 @@ def linked_text(value: str) -> str:
     if names:
         return "、".join(esc(name.strip()) for name in names)
     return esc(value)
+
+def get_export_dir() -> Path:
+    # 用關鍵字找匯出資料夾，不要寫死那次匯出的 ID，
+    # 不然你下次重新匯出 Notion 就找不到了
+    dirs = [p for p in ROOT.iterdir()
+            if p.is_dir() and "exportblock" in p.name.lower()]
+    if not dirs:
+        raise FileNotFoundError("找不到解壓縮後的 Notion 匯出資料夾")
+    return dirs[0]
+
+def load_image_bytes(value: str, export_dir: Path) -> bytes | None:
+    value = (value or "").strip()
+    if not value:
+        return None
+    if value.lower().startswith("http"):
+        try:  # 外連圖片：直接下載
+            with urllib.request.urlopen(value, timeout=15) as resp:
+                return resp.read()
+        except Exception:
+            return None
+    for base in (export_dir, ROOT):  # 本地檔名：先找匯出資料夾，再找專案根目錄
+        candidate = base / value
+        if candidate.is_file():
+            return candidate.read_bytes()
+    return None  # 檔名在匯出資料夾裡不存在 → 視為無圖
+
+def image_data_uri(value: str, export_dir: Path, max_width: int = 1200) -> str:
+    if value in _image_cache:
+        return _image_cache[value]
+    uri = ""
+    raw = load_image_bytes(value, export_dir)
+    if raw:
+        try:
+            if HAS_PIL:  # 壓到寬 1200px、轉 JPEG，PDF 才不會爆肥
+                img = Image.open(BytesIO(raw))
+                if img.width > max_width:
+                    img = img.resize((max_width, int(img.height * max_width / img.width)))
+                buf = BytesIO()
+                img.convert("RGB").save(buf, "JPEG", quality=82)
+                raw, mime = buf.getvalue(), "image/jpeg"
+            else:
+                mime = "image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+            uri = "data:" + mime + ";base64," + base64.b64encode(raw).decode()
+        except Exception:
+            uri = ""
+    _image_cache[value] = uri
+    return uri
 
 
 def time_key(row: dict[str, str]) -> tuple[int, str]:
@@ -122,10 +180,20 @@ def make_booklet() -> str:
         title = esc(day.get("day_title") or f"Day {day_no:02d}")
         date = esc(day.get("day_dis_date") or day.get("day_date"))
         description = esc(day.get("day_description"))
+        export_dir = get_export_dir()  # 迴圈外取一次即可，建議移到 make_booklet() 開頭
+
+        hero = image_data_uri(day.get("day_image") or "", export_dir)
+        if not hero:
+            for item in activities.get(day_no, []):
+                hero = image_data_uri(item.get("spot_image") or "", export_dir)
+                if hero:
+                    break
+        hero_html = f'<div class="day-hero"><img src="{hero}" alt=""></div>' if hero else ""
         days.append(
             f'<section class="day"><header class="day-header"><div class="eyebrow">DAY {day_no:02d}'
             f'{f"　·　{date}" if date else ""}</div><h2>{title}</h2>'
             f'{f"<p>{description}</p>" if description else ""}</header>'
+            f'{hero_html}'
             f'<ol class="timeline">{"".join(plans) or "<li>尚未安排活動</li>"}</ol>'
             f'{f"<footer class=\"day-footer\">{"".join(meals)}</footer>" if meals else ""}</section>'
         )
@@ -151,6 +219,8 @@ h1 {{ font-family:serif; font-size:29pt; line-height:1.3; margin:9mm 0 3mm; colo
 .event p {{ margin:1mm 0; color:#586c64 }} .event small {{ color:#89958f }}
 .day-footer {{ margin-top:7mm; padding:4mm; background:#f1f4ef; border-radius:3mm; break-inside:avoid }}
 .day-footer div {{ display:grid; grid-template-columns:14mm 1fr; gap:2mm; margin:1.3mm 0 }} .day-footer b {{ color:#718a76 }}
+.day-hero { margin:0 0 5mm }
+.day-hero img { width:100%; border-radius:3mm; display:block }
 </style></head><body>
 <section class="cover"><div class="eyebrow">TRAVEL JOURNAL　/　2026</div><h1>{title}</h1>
 <div class="subtitle">{subtitle}</div><div class="destination">{destination}{f"　·　{duration}" if duration else ""}</div>
