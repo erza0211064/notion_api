@@ -14,7 +14,6 @@ import subprocess
 import sys
 from pathlib import Path
 import base64
-from turtle import width
 import urllib.request
 from io import BytesIO
 
@@ -33,10 +32,7 @@ _image_cache: dict[str, str] = {}
 
 
 def find_csv(pattern: str) -> Path:
-    export_dirs = [path for path in ROOT.iterdir() if path.is_dir() and path.name.startswith(EXPORT_PREFIX)]
-    if not export_dirs:
-        raise FileNotFoundError("找不到解壓縮後的 Notion 匯出資料夾")
-    export_dir = export_dirs[0]
+    export_dir = get_export_dir()
     # Windows' filesystem glob can be surprisingly strict about mixed case;
     # compare the ASCII stem without case sensitivity instead.
     token = next(part for part in pattern.split("*") if part).lower()
@@ -219,8 +215,8 @@ h1 {{ font-family:serif; font-size:29pt; line-height:1.3; margin:9mm 0 3mm; colo
 .event p {{ margin:1mm 0; color:#586c64 }} .event small {{ color:#89958f }}
 .day-footer {{ margin-top:7mm; padding:4mm; background:#f1f4ef; border-radius:3mm; break-inside:avoid }}
 .day-footer div {{ display:grid; grid-template-columns:14mm 1fr; gap:2mm; margin:1.3mm 0 }} .day-footer b {{ color:#718a76 }}
-.day-hero { margin:0 0 5mm }
-.day-hero img { width:100%; border-radius:3mm; display:block }
+.day-hero {{ margin:0 0 5mm }}
+.day-hero img {{ width:100%; border-radius:3mm; display:block }}
 </style></head><body>
 <section class="cover"><div class="eyebrow">TRAVEL JOURNAL　/　2026</div><h1>{title}</h1>
 <div class="subtitle">{subtitle}</div><div class="destination">{destination}{f"　·　{duration}" if duration else ""}</div>
