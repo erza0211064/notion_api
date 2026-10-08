@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -46,6 +47,12 @@ PDF_PATH = ROOT / "Dolomites_Travel_Booklet_2026.pdf"
 HTML_PATH = ROOT / "Dolomites_Travel_Booklet_2026.html"
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "").strip()
+
+# ---- 版面微調（手動調整區）----
+# 每日 hero 圖 / 美食住宿卡片照片的顯示高度（mm）。
+# 照片會以 object-fit:cover 裁成固定高度，改這兩個數字即可調整版面。
+HERO_HEIGHT_MM = 72
+CARD_IMG_HEIGHT_MM = 45
 
 # Data source IDs of the TravelBooklet Planner template.
 # Find yours: open the "DB of TravelBooklet Planner" page in Notion,
@@ -216,6 +223,61 @@ def hero_for_day(client_pages_unused, day: dict, items: list[dict]) -> str:
     return ""
 
 
+TRAFFIC_ICON = {"flight": "✈️", "train": "🚂", "car": "🚗"}
+
+
+def format_daterange(page: dict, name: str) -> str:
+    """Format a Notion date property (start/end) as 'M/D HH:MM → HH:MM'."""
+    p = _prop(page, name)
+    if not p or p.get("type") != "date" or not p.get("date"):
+        return ""
+
+    def fmt(s: str) -> str:
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return s[:16]
+        date_part = f"{dt.month}/{dt.day}"
+        if "T" not in s and dt.hour == 0 and dt.minute == 0:
+            return date_part  # date-only value
+        return f"{date_part} {dt.hour:02d}:{dt.minute:02d}"
+
+    start = p["date"].get("start") or ""
+    end = p["date"].get("end") or ""
+    if not start:
+        return ""
+    fs = fmt(start)
+    if end and end != start:
+        fe = fmt(end)
+        if " " in fs and " " in fe and fs.split(" ")[0] == fe.split(" ")[0]:
+            return f"{fs} → {fe.split(' ', 1)[1]}"  # same day: shorten
+        return f"{fs} → {fe}"
+    return fs
+
+
+def is_booked(page: dict, name: str) -> bool:
+    p = _prop(page, name)
+    return bool(p and p.get("type") == "checkbox" and p.get("checkbox"))
+
+
+def first_image_uri(page: dict, name: str) -> str:
+    """Download the first image of a files property as a data URI."""
+    for _, url in file_urls(page, name):
+        uri = download_image(url)
+        if uri:
+            return uri
+    return ""
+
+
+def chapter_name(rows: list[dict], key: str, fallback: str) -> str:
+    """Section title from the template's *_page_name property."""
+    for row in rows:
+        v = text_of(row, key)
+        if v:
+            return v
+    return fallback
+
+
 # --------------------------------------------------------------------------
 # Booklet
 # --------------------------------------------------------------------------
@@ -235,6 +297,18 @@ def make_booklet(client: "Client") -> str:
     trip_rows = query_all(client, DATA_SOURCES["trip"])
     day_rows = query_all(client, DATA_SOURCES["day"])
     itinerary = query_all(client, DATA_SOURCES["itinerary"])
+    food_rows = sorted(
+        query_all(client, DATA_SOURCES["food"]),
+        key=lambda r: num(r, "food_slide_order", 999),
+    )
+    stay_rows = sorted(
+        query_all(client, DATA_SOURCES["stay"]),
+        key=lambda r: num(r, "stay_slide_order", 999),
+    )
+    traffic_rows = sorted(
+        query_all(client, DATA_SOURCES["traffic"]),
+        key=lambda r: num(r, "traffic_slide_order", 999),
+    )
     if not trip_rows:
         raise ValueError("行程總覽資料庫沒有資料（請確認 integration 有權限）")
     trip = trip_rows[0]
@@ -303,6 +377,89 @@ def make_booklet(client: "Client") -> str:
             f"</section>"
         )
 
+    # ---- 新增章節：交通 / 美食 / 住宿 ----
+    traffic_cards = []
+    for row in traffic_rows:
+        name = esc(text_of(row, "traffic_name"))
+        if not name:
+            continue
+        ttype = text_of(row, "traffic_type")  # e.g. "flight | 航班"
+        code = ttype.split("|")[0].strip().lower()
+        label = ttype.split("|")[1].strip() if "|" in ttype else ttype
+        icon = TRAFFIC_ICON.get(code, "🚌")
+        when = esc(format_daterange(row, "traffic_datetime"))
+        type_html = (
+            f'<div class="traffic-type">{esc(label)}</div>' if label else ""
+        )
+        traffic_cards.append(
+            f'<article class="traffic-card"><div class="traffic-icon">{icon}</div>'
+            f"<div>{type_html}<h3>{name}</h3>"
+            f'{f"<p>{when}</p>" if when else ""}</div></article>'
+        )
+    traffic_section = (
+        f'<section class="chapter"><div class="eyebrow">TRANSPORT</div>'
+        f'<h2 class="section-title">🚄 '
+        f"{esc(chapter_name(traffic_rows, 'traffic_page_name', '交通'))}</h2>"
+        f'<div class="traffic-list">{"".join(traffic_cards)}</div></section>'
+    ) if traffic_cards else ""
+
+    food_cards = []
+    for row in food_rows:
+        name = esc(text_of(row, "food_name"))
+        if not name:
+            continue
+        desc = esc(text_of(row, "food_description"))
+        meta = " · ".join(
+            filter(
+                None,
+                [esc(text_of(row, "food_address")), esc(text_of(row, "food_phone"))],
+            )
+        )
+        uri = first_image_uri(row, "food_image")
+        img = f'<img class="card-img" src="{uri}" alt="">' if uri else ""
+        food_cards.append(
+            f'<article class="food-card">{img}<h3>{name}</h3>'
+            f'{f"<p>{desc}</p>" if desc else ""}'
+            f'{f"<small>{meta}</small>" if meta else ""}</article>'
+        )
+    food_section = (
+        f'<section class="chapter"><div class="eyebrow">DINING</div>'
+        f'<h2 class="section-title">🍽 '
+        f"{esc(chapter_name(food_rows, 'food_page_name', '美食'))}</h2>"
+        f'<div class="cards">{"".join(food_cards)}</div></section>'
+    ) if food_cards else ""
+
+    stay_cards = []
+    for row in stay_rows:
+        name = esc(text_of(row, "stay_name"))
+        if not name:
+            continue
+        desc = esc(text_of(row, "stay_description"))
+        meta = " · ".join(
+            filter(
+                None,
+                [esc(text_of(row, "stay_address")), esc(text_of(row, "stay_phone"))],
+            )
+        )
+        uri = first_image_uri(row, "stay_image")
+        img = f'<img class="card-img" src="{uri}" alt="">' if uri else ""
+        booked = (
+            '<div class="booked">✅ 已預訂</div>'
+            if is_booked(row, "stay_booked")
+            else ""
+        )
+        stay_cards.append(
+            f'<article class="stay-card">{img}<h3>{name}</h3>'
+            f'{f"<p>{desc}</p>" if desc else ""}'
+            f'{f"<small>{meta}</small>" if meta else ""}{booked}</article>'
+        )
+    stay_section = (
+        f'<section class="chapter"><div class="eyebrow">STAY</div>'
+        f'<h2 class="section-title">🏨 '
+        f"{esc(chapter_name(stay_rows, 'stay_page_name', '住宿'))}</h2>"
+        f'<div class="cards">{"".join(stay_cards)}</div></section>'
+    ) if stay_cards else ""
+
     title = esc(text_of(trip, "trip_title"))
     subtitle = esc(text_of(trip, "trip_subtitle"))
     duration = esc(text_of(trip, "trip_duration"))
@@ -322,19 +479,31 @@ h1 {{ font-family:serif; font-size:29pt; line-height:1.3; margin:9mm 0 3mm; colo
 .intro {{ margin-top:9mm; max-width:95%; color:#60736b }} .section-title {{ font:20pt serif; margin:0 0 8mm }}
 .day {{ page-break-before:always; break-before:page }} .day-header {{ border-bottom:1px solid #cdd7cf; padding-bottom:5mm; margin-bottom:5mm }}
 .day-header h2 {{ font:22pt serif; margin:2mm 0 }} .day-header p {{ color:#61756a; margin:2mm 0 0 }}
-.day-hero {{ margin:0 0 5mm }} .day-hero img {{ width:100%; border-radius:3mm; display:block }}
+.day-hero {{ margin:0 0 5mm }} .day-hero img {{ width:100%; height:{HERO_HEIGHT_MM}mm; object-fit:cover; border-radius:3mm; display:block }}
 .timeline {{ list-style:none; padding:0; margin:0 }} .event {{ display:grid; grid-template-columns:16mm 1fr; gap:3mm; padding:3.5mm 0; border-bottom:1px solid #e7ece8; break-inside:avoid }}
 .event-time {{ color:#718a76; font-weight:700; font-size:9pt; padding-top:1mm }} .event h3 {{ font-size:11pt; margin:0; color:#2e443b }}
 .event p {{ margin:1mm 0; color:#586c64 }} .event small {{ color:#89958f }}
 .day-footer {{ margin-top:7mm; padding:4mm; background:#f1f4ef; border-radius:3mm; break-inside:avoid }}
 .day-footer div {{ display:grid; grid-template-columns:14mm 1fr; gap:2mm; margin:1.3mm 0 }} .day-footer b {{ color:#718a76 }}
+.chapter {{ page-break-before:always; break-before:page }} .chapter .section-title {{ margin-bottom:6mm }}
+.cards {{ display:grid; grid-template-columns:1fr 1fr; gap:4mm }}
+.food-card,.stay-card {{ background:#fffdf7; border:1px solid #ece2cf; border-radius:3mm; padding:4mm; break-inside:avoid }}
+.food-card h3,.stay-card h3 {{ font-size:11pt; margin:0 0 1mm; color:#2e443b }}
+.food-card p,.stay-card p {{ margin:1mm 0; color:#586c64 }} .food-card small,.stay-card small {{ color:#89958f }}
+.card-img {{ width:100%; height:{CARD_IMG_HEIGHT_MM}mm; object-fit:cover; border-radius:2mm; margin-bottom:3mm; display:block }}
+.traffic-list {{ display:flex; flex-direction:column; gap:3mm }}
+.traffic-card {{ display:grid; grid-template-columns:12mm 1fr; gap:3mm; background:#fffdf7; border:1px solid #ece2cf; border-radius:3mm; padding:4mm; break-inside:avoid; align-items:start }}
+.traffic-icon {{ font-size:16pt; line-height:1.2 }} .traffic-type {{ color:#718a76; font-size:9pt; font-weight:700; letter-spacing:.08em }}
+.traffic-card h3 {{ font-size:11pt; margin:1mm 0; color:#2e443b }} .traffic-card p {{ margin:0; color:#586c64 }}
+.booked {{ margin-top:2mm; color:#4a7c59; font-weight:700; font-size:9pt }}
 </style></head><body>
 <section class="cover"><div class="eyebrow">TRAVEL JOURNAL　/　2026</div><h1>{title}</h1>
 <div class="subtitle">{subtitle}</div><div class="destination">{destination}{f"　·　{duration}" if duration else ""}</div>
 <p class="intro">旅程小冊子<br>每日行程、景點資訊與餐宿安排</p></section>
 <section class="day"><div class="eyebrow">ITINERARY</div><h2 class="section-title">每日行程</h2>
 <p>{destination}{f"　·　{duration}" if duration else ""}</p><p>共 {len(days)} 天行程</p></section>
-{"".join(days)}</body></html>'''
+{traffic_section}
+{"".join(days)}{food_section}{stay_section}</body></html>'''
 
 
 def main() -> None:
